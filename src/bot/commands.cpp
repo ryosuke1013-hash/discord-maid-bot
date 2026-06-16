@@ -32,32 +32,20 @@ struct PendingReminderInput {
     std::string message;
 };
 
-enum class ConversationStep {
-    TodoTask,
-    ReminderTime,
-    ReminderMessage,
-    HimaGame,
-    HimaTarget,
-    HimaStart,
-    HimaNote,
-};
-
-struct ConversationState {
-    ConversationStep step{};
+struct PendingHimaInput {
+    dpp::snowflake user_id{};
+    dpp::snowflake guild_id{};
     dpp::snowflake channel_id{};
-    std::string when;
-    std::string message;
-    std::string game;
-    std::string mention_text;
-    std::string start_time;
+    std::vector<dpp::snowflake> users;
 };
 
 std::mutex pending_reminders_mutex;
 std::unordered_map<std::string, PendingReminderInput> pending_reminders;
 uint64_t next_pending_reminder_id = 1;
 
-std::mutex conversations_mutex;
-std::unordered_map<uint64_t, ConversationState> conversations;
+std::mutex pending_hima_mutex;
+std::unordered_map<std::string, PendingHimaInput> pending_hima;
+uint64_t next_pending_hima_id = 1;
 
 uint64_t get_user_id(const dpp::slashcommand_t& event) {
     if (event.command.member.user_id != 0) {
@@ -94,22 +82,6 @@ uint64_t get_user_id(const dpp::form_submit_t& event) {
     return static_cast<uint64_t>(event.command.usr.id);
 }
 
-void set_conversation(dpp::snowflake user_id, ConversationState state) {
-    std::lock_guard lock(conversations_mutex);
-    conversations[static_cast<uint64_t>(user_id)] = std::move(state);
-}
-
-std::optional<ConversationState> take_conversation(dpp::snowflake user_id) {
-    std::lock_guard lock(conversations_mutex);
-    const auto it = conversations.find(static_cast<uint64_t>(user_id));
-    if (it == conversations.end()) {
-        return std::nullopt;
-    }
-    ConversationState state = std::move(it->second);
-    conversations.erase(it);
-    return state;
-}
-
 bool has_master_role(const std::vector<dpp::snowflake>& roles) {
     for (const dpp::snowflake role_id : roles) {
         const dpp::role* role = dpp::find_role(role_id);
@@ -129,10 +101,6 @@ bool is_master(const dpp::slashcommand_t& event) {
 }
 
 bool is_master(const dpp::button_click_t& event) {
-    return has_master_role(event.command.member);
-}
-
-bool is_master(const dpp::select_click_t& event) {
     return has_master_role(event.command.member);
 }
 
@@ -253,19 +221,6 @@ bool is_user_private_room(Storage& storage, dpp::snowflake user_id, dpp::snowfla
     return false;
 }
 
-bool is_cancel_text(const std::string& text) {
-    return text == "キャンセル" ||
-           text == "cancel" ||
-           text == "Cancel" ||
-           text == "CANCEL" ||
-           text == "中止" ||
-           text == "やめる";
-}
-
-bool is_none_text(const std::string& text) {
-    return text == "なし" || text == "無し" || text == "なし。";
-}
-
 void append_unique(std::vector<dpp::snowflake>& values, dpp::snowflake value) {
     if (value == 0 || std::find(values.begin(), values.end(), value) != values.end()) {
         return;
@@ -292,31 +247,6 @@ VcMentionTarget mention_target_from_slash(const dpp::slashcommand_t& event) {
             target.text += " ";
         }
         target.text += "<@&" + std::to_string(static_cast<uint64_t>(*role)) + ">";
-    }
-
-    return target;
-}
-
-VcMentionTarget mention_target_from_text(const std::string& text) {
-    VcMentionTarget target;
-    if (is_none_text(text)) {
-        return target;
-    }
-
-    target.text = text;
-    std::smatch match;
-    std::string rest = text;
-    const std::regex user_pattern(R"(<@!?(\d+)>)");
-    while (std::regex_search(rest, match, user_pattern)) {
-        append_unique(target.users, dpp::snowflake{std::stoull(match[1])});
-        rest = match.suffix();
-    }
-
-    rest = text;
-    const std::regex role_pattern(R"(<@&(\d+)>)");
-    while (std::regex_search(rest, match, role_pattern)) {
-        append_unique(target.roles, dpp::snowflake{std::stoull(match[1])});
-        rest = match.suffix();
     }
 
     return target;
@@ -599,13 +529,6 @@ dpp::component text_input(std::string id, std::string label, std::string placeho
     return input;
 }
 
-dpp::component modal_row(dpp::component input) {
-    dpp::component row;
-    row.set_type(dpp::cot_action_row);
-    row.add_component(input);
-    return row;
-}
-
 dpp::component select_menu(std::string id, std::string placeholder, std::vector<dpp::select_option> options) {
     dpp::component menu;
     menu.set_type(dpp::cot_selectmenu)
@@ -665,23 +588,105 @@ dpp::message reminder_menu_response() {
 
 dpp::interaction_modal_response todo_add_modal() {
     dpp::interaction_modal_response modal("hi:todo:add_modal", "TODO追加");
-    modal.add_component(modal_row(text_input("task", "内容", "例: レポートを書く")));
+    modal.add_component(text_input("task", "内容", "例: レポートを書く"));
     return modal;
 }
 
 dpp::interaction_modal_response reminder_add_modal() {
     dpp::interaction_modal_response modal("hi:remind:add_modal", "リマインダー追加");
-    modal.add_component(modal_row(text_input("message", "内容", "例: 薬を飲む")));
-    modal.add_component(modal_row(text_input("when", "時間", "例: 18:30 / 明日 9時")));
+    modal.add_component(text_input("message", "内容", "例: 薬を飲む"));
+    modal.add_component(text_input("when", "時間", "例: 18:30 / 明日 9時"));
     return modal;
 }
 
-dpp::interaction_modal_response hima_modal() {
-    dpp::interaction_modal_response modal("hi:hima:modal", "募集");
-    modal.add_component(modal_row(text_input("game", "ゲーム名", "例: valorant")));
-    modal.add_component(modal_row(text_input("start", "開始時刻", "例: 21:00 / 今から / 未定", false)));
-    modal.add_component(modal_row(text_input("note", "メッセージ", "例: あと1人", false)));
+struct HimaContext {
+    dpp::snowflake guild_id{};
+    dpp::snowflake channel_id{};
+};
+
+std::string hima_context_suffix(dpp::snowflake guild_id, dpp::snowflake channel_id) {
+    return std::to_string(static_cast<uint64_t>(guild_id)) + ":" + std::to_string(static_cast<uint64_t>(channel_id));
+}
+
+dpp::message hima_target_response(dpp::snowflake guild_id, dpp::snowflake channel_id) {
+    dpp::message response("通知するユーザーをお選びください。");
+    dpp::component menu;
+    menu.set_type(dpp::cot_user_selectmenu)
+        .set_id("hi:hima:users:" + hima_context_suffix(guild_id, channel_id))
+        .set_placeholder("通知するユーザーを選択")
+        .set_min_values(1)
+        .set_max_values(3);
+    response.add_component(dpp::component().add_component(menu));
+    response.add_component(action_row({
+        make_button("指定なし", "hi:hima:none:" + hima_context_suffix(guild_id, channel_id), dpp::cos_secondary)
+    }));
+    return response;
+}
+
+dpp::interaction_modal_response hima_modal(const std::string& pending_id) {
+    std::string id = "hi:hima:modal:" + pending_id;
+    dpp::interaction_modal_response modal(id, "募集");
+    modal.add_component(text_input("game", "ゲーム名", "例: valorant"));
+    modal.add_component(text_input("start", "開始時刻", "例: 21:00 / 今から / 未定", false));
+    modal.add_component(text_input("note", "メッセージ", "例: あと1人", false));
     return modal;
+}
+
+std::string create_pending_hima(dpp::snowflake user_id, dpp::snowflake guild_id, dpp::snowflake channel_id, std::vector<dpp::snowflake> users = {}) {
+    std::lock_guard lock(pending_hima_mutex);
+    const std::string id = std::to_string(next_pending_hima_id++);
+    pending_hima[id] = PendingHimaInput{user_id, guild_id, channel_id, std::move(users)};
+    return id;
+}
+
+std::optional<PendingHimaInput> take_pending_hima(const std::string& id, dpp::snowflake user_id) {
+    std::lock_guard lock(pending_hima_mutex);
+    const auto it = pending_hima.find(id);
+    if (it == pending_hima.end() || it->second.user_id != user_id) {
+        return std::nullopt;
+    }
+    PendingHimaInput input = std::move(it->second);
+    pending_hima.erase(it);
+    return input;
+}
+
+std::string pending_hima_id_from_modal_id(const std::string& custom_id) {
+    const std::string prefix = "hi:hima:modal:";
+    if (custom_id.rfind(prefix, 0) != 0) {
+        return {};
+    }
+    return custom_id.substr(prefix.size());
+}
+
+HimaContext hima_context_from_id(const std::string& custom_id, const std::string& prefix, dpp::snowflake fallback_guild_id, dpp::snowflake fallback_channel_id) {
+    if (custom_id.rfind(prefix, 0) != 0) {
+        return HimaContext{fallback_guild_id, fallback_channel_id};
+    }
+
+    std::stringstream stream(custom_id.substr(prefix.size()));
+    std::string guild_text;
+    std::string channel_text;
+    if (!std::getline(stream, guild_text, ':') || !std::getline(stream, channel_text, ':')) {
+        return HimaContext{fallback_guild_id, fallback_channel_id};
+    }
+
+    try {
+        return HimaContext{dpp::snowflake{std::stoull(guild_text)}, dpp::snowflake{std::stoull(channel_text)}};
+    } catch (...) {
+        return HimaContext{fallback_guild_id, fallback_channel_id};
+    }
+}
+
+VcMentionTarget mention_target_from_users(const std::vector<dpp::snowflake>& users) {
+    VcMentionTarget target;
+    for (const dpp::snowflake user : users) {
+        append_unique(target.users, user);
+        if (!target.text.empty()) {
+            target.text += " ";
+        }
+        target.text += "<@" + std::to_string(static_cast<uint64_t>(user)) + ">";
+    }
+    return target;
 }
 
 std::string create_pending_reminder(dpp::snowflake user_id, dpp::snowflake channel_id, std::string message) {
@@ -712,23 +717,39 @@ dpp::interaction_modal_response reminder_time_modal(const std::string& id) {
         .set_max_length(50)
         .set_required(true);
 
-    dpp::component row;
-    row.add_component(input);
-    return dpp::interaction_modal_response(id, "リマインダーの時間", {row});
+    return dpp::interaction_modal_response(id, "リマインダーの時間", {input});
 }
 
 std::optional<std::string> modal_value(const dpp::form_submit_t& event, const std::string& id) {
-    for (const dpp::component& row : event.components) {
-        for (const dpp::component& component : row.components) {
+    for (const dpp::component& component : event.components) {
+        if (component.custom_id == id && std::holds_alternative<std::string>(component.value)) {
+            return std::get<std::string>(component.value);
+        }
+
+        for (const dpp::component& child : component.components) {
+            if (child.custom_id == id && std::holds_alternative<std::string>(child.value)) {
+                return std::get<std::string>(child.value);
+            }
+
+            for (const dpp::component& component : child.components) {
             if (component.custom_id == id && std::holds_alternative<std::string>(component.value)) {
                 return std::get<std::string>(component.value);
             }
         }
     }
+    }
     return std::nullopt;
 }
 
 void show_dialog(const dpp::button_click_t& event, const dpp::interaction_modal_response& modal) {
+    event.dialog(modal, [](const dpp::confirmation_callback_t& callback) {
+        if (callback.is_error()) {
+            std::cerr << "Modal error: " << callback.get_error().message << '\n';
+        }
+    });
+}
+
+void show_dialog(const dpp::select_click_t& event, const dpp::interaction_modal_response& modal) {
     event.dialog(modal, [](const dpp::confirmation_callback_t& callback) {
         if (callback.is_error()) {
             std::cerr << "Modal error: " << callback.get_error().message << '\n';
@@ -1082,11 +1103,13 @@ void register_command_handlers(dpp::cluster& bot, Storage& storage, RoomManager&
             } else if (event.custom_id == "hi:room") {
                 rooms.open_room(bot, event);
             } else if (event.custom_id == "hi:hima") {
-                set_conversation(user_id, ConversationState{ConversationStep::HimaGame, event.command.channel_id});
-                event.reply(ephemeral_message(polite(master, "募集するゲーム名を入力してください。", "ゲーム名。")));
+                event.reply(ephemeral_message(hima_target_response(event.command.guild_id, event.command.channel_id)));
+            } else if (event.custom_id.rfind("hi:hima:none:", 0) == 0) {
+                const HimaContext context = hima_context_from_id(event.custom_id, "hi:hima:none:", event.command.guild_id, event.command.channel_id);
+                const std::string pending_id = create_pending_hima(user_id, context.guild_id, context.channel_id);
+                show_dialog(event, hima_modal(pending_id));
             } else if (event.custom_id == "hi:todo:add") {
-                set_conversation(user_id, ConversationState{ConversationStep::TodoTask, event.command.channel_id});
-                event.reply(ephemeral_message(polite(master, "TODOの内容を入力してください。", "内容。")));
+                show_dialog(event, todo_add_modal());
             } else if (event.custom_id == "hi:todo:list") {
                 event.reply(ephemeral_message(todo_list_response(storage.list_todos(user_id))));
             } else if (event.custom_id == "hi:todo:notify") {
@@ -1097,8 +1120,7 @@ void register_command_handlers(dpp::cluster& bot, Storage& storage, RoomManager&
                 storage.set_todo_notification(user_id, interval);
                 event.reply(ephemeral_message(interval <= 0 ? "TODO通知を止めました。" : "TODO通知を " + todo_notification_label(interval) + " に設定しました。"));
             } else if (event.custom_id == "hi:remind:add") {
-                set_conversation(user_id, ConversationState{ConversationStep::ReminderTime, event.command.channel_id});
-                event.reply(ephemeral_message(polite(master, "リマインダーの時間を入力してください。", "時間。")));
+                show_dialog(event, reminder_add_modal());
             } else if (event.custom_id == "hi:remind:list") {
                 event.reply(ephemeral_message(reminder_list_response(storage.list_reminders(user_id))));
             } else if (event.custom_id == "hi:remind:cancel") {
@@ -1127,6 +1149,17 @@ void register_command_handlers(dpp::cluster& bot, Storage& storage, RoomManager&
     bot.on_select_click([&storage](const dpp::select_click_t& event) {
         const dpp::snowflake user_id{get_user_id(event)};
         try {
+            if (event.custom_id.rfind("hi:hima:users:", 0) == 0) {
+                const HimaContext context = hima_context_from_id(event.custom_id, "hi:hima:users:", event.command.guild_id, event.command.channel_id);
+                std::vector<dpp::snowflake> users;
+                for (const std::string& value : event.values) {
+                    append_unique(users, dpp::snowflake{std::stoull(value)});
+                }
+                const std::string pending_id = create_pending_hima(user_id, context.guild_id, context.channel_id, std::move(users));
+                show_dialog(event, hima_modal(pending_id));
+                return;
+            }
+
             const uint64_t id = selected_id(event.values);
             if (event.custom_id == "todo:done_select") {
                 event.reply(complete_todo_by_id(storage, user_id, id));
@@ -1146,11 +1179,11 @@ void register_command_handlers(dpp::cluster& bot, Storage& storage, RoomManager&
         if (event.custom_id == "hi:todo:add_modal") {
             const auto task = modal_value(event, "task");
             if (!task || task->empty()) {
-                event.reply("内容を入力してください。");
+                event.reply(ephemeral_message("内容を入力してください。"));
                 return;
             }
             const Todo todo = storage.add_todo(user_id, *task);
-            event.reply("承りました。お仕事 `#" + std::to_string(todo.id) + "` を追加しました。");
+            event.reply(ephemeral_message("承りました。お仕事 `#" + std::to_string(todo.id) + "` を追加しました。"));
             return;
         }
 
@@ -1158,7 +1191,7 @@ void register_command_handlers(dpp::cluster& bot, Storage& storage, RoomManager&
             const auto message = modal_value(event, "message");
             const auto when = modal_value(event, "when");
             if (!message || message->empty()) {
-                event.reply("内容を入力してください。");
+                event.reply(ephemeral_message("内容を入力してください。"));
                 return;
             }
 
@@ -1170,16 +1203,26 @@ void register_command_handlers(dpp::cluster& bot, Storage& storage, RoomManager&
             }
 
             const Reminder reminder = storage.add_reminder_at(user_id, event.command.channel_id, *due_at, *message);
-            event.reply("「" + reminder.message + "」を " + format_time(reminder.due_at) + " にお知らせします。");
+            event.reply(ephemeral_message("「" + reminder.message + "」を " + format_time(reminder.due_at) + " にお知らせします。"));
             return;
         }
 
-        if (event.custom_id == "hi:hima:modal") {
+        if (event.custom_id.rfind("hi:hima:modal:", 0) == 0) {
+            const std::string pending_id = pending_hima_id_from_modal_id(event.custom_id);
+            const auto pending = take_pending_hima(pending_id, user_id);
+            if (!pending) {
+                event.reply(ephemeral_message("入力の有効期限が切れました。もう一度お試しください。"));
+                return;
+            }
+            std::cerr << "Hima modal submit: pending=" << pending_id
+                      << " guild=" << static_cast<uint64_t>(pending->guild_id)
+                      << " channel=" << static_cast<uint64_t>(pending->channel_id)
+                      << " users=" << pending->users.size() << '\n';
             const auto game = modal_value(event, "game");
             const auto start = modal_value(event, "start");
             const auto note = modal_value(event, "note");
             if (!game || game->empty()) {
-                event.reply("ゲーム名を入力してください。");
+                event.reply(ephemeral_message("ゲーム名を入力してください。"));
                 return;
             }
             std::optional<std::string> start_value;
@@ -1194,10 +1237,11 @@ void register_command_handlers(dpp::cluster& bot, Storage& storage, RoomManager&
                 bot,
                 event,
                 *game,
-                VcMentionTarget{},
+                mention_target_from_users(pending->users),
                 start_value,
                 note_value,
-                vc_announce_channel_id(storage, user_id, event.command.guild_id, event.command.channel_id)
+                vc_announce_channel_id(storage, user_id, pending->guild_id, pending->channel_id),
+                pending->guild_id
             );
             return;
         }
@@ -1224,121 +1268,23 @@ void register_command_handlers(dpp::cluster& bot, Storage& storage, RoomManager&
         event.reply("「" + reminder.message + "」を " + format_time(reminder.due_at) + " にお知らせします。");
     });
 
-    bot.on_message_create([&storage, &bot, &hima](const dpp::message_create_t& event) {
+    bot.on_message_create([](const dpp::message_create_t& event) {
         if (event.msg.author.is_bot()) {
             return;
         }
 
-        const dpp::snowflake user_id{event.msg.author.id};
         const bool master = is_master(event);
-        auto state = take_conversation(user_id);
         const std::string text = event.msg.content;
-        if (!state) {
-            if (text == "おはよう" || text == "おはようございます") {
-                event.reply(polite(master, "おはようございます、ご主人様。", "おはよう。"));
-            } else if (text == "こんにちは" || text == "こんにちわ") {
-                event.reply(polite(master, "こんにちは、ご主人様。", "用件は？"));
-            } else if (text == "こんばんは") {
-                event.reply(polite(master, "こんばんは、ご主人様。", "こんばんは。"));
-            } else if (text == "ただいま") {
-                event.reply(polite(master, "おかえりなさいませ、ご主人様。", "戻ったの。"));
-            } else if (text == "おやすみ") {
-                event.reply(polite(master, "おやすみなさいませ、ご主人様。", "はい。"));
-            }
-            return;
-        }
-
-        if (is_cancel_text(text)) {
-            event.reply(polite(master, "キャンセルしました。", "やめた。"));
-            return;
-        }
-
-        if (text.empty()) {
-            event.reply(polite(master, "入力内容を読めませんでした。もう一度 /hi からお試しください。", "読めない。やり直して。"));
-            return;
-        }
-
-        try {
-            switch (state->step) {
-                case ConversationStep::TodoTask: {
-                    const Todo todo = storage.add_todo(user_id, text);
-                    event.reply(polite(master, "承りました。お仕事 `#" + std::to_string(todo.id) + "` を追加しました。", "追加した。"));
-                    break;
-                }
-                case ConversationStep::ReminderTime: {
-                    const auto due_at = parse_reminder_time(text);
-                    if (!due_at) {
-                        set_conversation(user_id, ConversationState{ConversationStep::ReminderTime, event.msg.channel_id});
-                        event.reply(polite(master, "時間を読み取れません。例: `18:30` / `明日 9時`", "時間が変。例: `18:30`"));
-                        return;
-                    }
-
-                    ConversationState next{ConversationStep::ReminderMessage, event.msg.channel_id};
-                    next.when = text;
-                    set_conversation(user_id, std::move(next));
-                    event.reply(polite(master, "リマインダーの内容を入力してください。", "内容。"));
-                    break;
-                }
-                case ConversationStep::ReminderMessage: {
-                    const auto due_at = parse_reminder_time(state->when);
-                    if (!due_at) {
-                        set_conversation(user_id, ConversationState{ConversationStep::ReminderTime, event.msg.channel_id});
-                        event.reply(polite(master, "時間をもう一度入力してください。", "時間、もう一度。"));
-                        return;
-                    }
-
-                    const Reminder reminder = storage.add_reminder_at(user_id, event.msg.channel_id, *due_at, text);
-                    event.reply(polite(master, "「" + reminder.message + "」を " + format_time(reminder.due_at) + " にお知らせします。", "登録した。"));
-                    break;
-                }
-                case ConversationStep::HimaGame: {
-                    ConversationState next{ConversationStep::HimaTarget, event.msg.channel_id};
-                    next.game = text;
-                    set_conversation(user_id, std::move(next));
-                    event.reply(polite(master, "送る相手を入力してください。ユーザーやロールをメンションできます。不要なら `なし` と入力してください。", "宛先。不要なら `なし`。"));
-                    break;
-                }
-                case ConversationStep::HimaTarget: {
-                    ConversationState next{ConversationStep::HimaStart, event.msg.channel_id};
-                    next.game = state->game;
-                    if (!is_none_text(text)) {
-                        next.mention_text = text;
-                    }
-                    set_conversation(user_id, std::move(next));
-                    event.reply(polite(master, "開始時刻を入力してください。未定なら `なし` と入力してください。", "開始時刻。未定なら `なし`。"));
-                    break;
-                }
-                case ConversationStep::HimaStart: {
-                    ConversationState next{ConversationStep::HimaNote, event.msg.channel_id};
-                    next.game = state->game;
-                    next.mention_text = state->mention_text;
-                    if (!is_none_text(text)) {
-                        next.start_time = text;
-                    }
-                    set_conversation(user_id, std::move(next));
-                    event.reply(polite(master, "募集メッセージを入力してください。不要なら `なし` と入力してください。", "募集文。不要なら `なし`。"));
-                    break;
-                }
-                case ConversationStep::HimaNote: {
-                    std::optional<std::string> start_time;
-                    if (!state->start_time.empty()) {
-                        start_time = state->start_time;
-                    }
-                    const std::optional<std::string> note = is_none_text(text) ? std::nullopt : std::optional<std::string>{text};
-                    hima.create_post(
-                        bot,
-                        event.msg,
-                        state->game,
-                        mention_target_from_text(state->mention_text),
-                        start_time,
-                        note,
-                        vc_announce_channel_id(storage, user_id, event.msg.guild_id, event.msg.channel_id)
-                    );
-                    break;
-                }
-            }
-        } catch (const std::exception& e) {
-            event.reply(std::string("入力処理に失敗しました: ") + e.what());
+        if (text == "おはよう" || text == "おはようございます") {
+            event.reply(polite(master, "おはようございます、ご主人様。", "おはよう。"));
+        } else if (text == "こんにちは" || text == "こんにちわ") {
+            event.reply(polite(master, "こんにちは、ご主人様。", "用件は？"));
+        } else if (text == "こんばんは") {
+            event.reply(polite(master, "こんばんは、ご主人様。", "こんばんは。"));
+        } else if (text == "ただいま") {
+            event.reply(polite(master, "おかえりなさいませ、ご主人様。", "戻ったの。"));
+        } else if (text == "おやすみ") {
+            event.reply(polite(master, "おやすみなさいませ、ご主人様。", "はい。"));
         }
     });
 

@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <iostream>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -30,6 +32,12 @@ bool has_master_role(const dpp::guild_member& member) {
 
 std::string polite(bool master, const std::string& master_text, const std::string& other_text) {
     return master ? master_text : other_text;
+}
+
+dpp::message ephemeral_message(std::string text) {
+    dpp::message message(std::move(text));
+    message.flags |= dpp::m_ephemeral;
+    return message;
 }
 
 } // namespace
@@ -95,6 +103,11 @@ void HimaVoiceManager::remember_post(const std::string& id, VoicePost post) {
 
 void HimaVoiceManager::create_post_for(dpp::cluster& bot, dpp::snowflake host_id, dpp::snowflake guild_id, dpp::snowflake announce_channel_id, const std::string& game, VcMentionTarget target, const std::optional<std::string>& start_time, const std::optional<std::string>& note) {
     const std::string id = next_id();
+    std::cerr << "VC create request: guild=" << static_cast<uint64_t>(guild_id)
+              << " announce_channel=" << static_cast<uint64_t>(announce_channel_id)
+              << " host=" << static_cast<uint64_t>(host_id)
+              << " game=" << game << '\n';
+
     dpp::channel voice;
     voice.guild_id = guild_id;
     voice.name = sanitize_channel_name(game);
@@ -105,11 +118,14 @@ void HimaVoiceManager::create_post_for(dpp::cluster& bot, dpp::snowflake host_id
 
     bot.channel_create(voice, [this, &bot, id, host_id, guild_id, announce_channel_id, game, target = std::move(target), start_time, note](const dpp::confirmation_callback_t& callback) {
         if (callback.is_error()) {
+            std::cerr << "VC channel create error: " << callback.get_error().message << '\n';
             bot.message_create(dpp::message(announce_channel_id, "募集VCの作成に失敗しました。"));
             return;
         }
 
         dpp::channel created = callback.get<dpp::channel>();
+        std::cerr << "VC channel created: channel=" << static_cast<uint64_t>(created.id)
+                  << " announce_channel=" << static_cast<uint64_t>(announce_channel_id) << '\n';
         VoicePost post;
         post.channel = created;
         post.host_id = host_id;
@@ -140,7 +156,13 @@ void HimaVoiceManager::create_post_for(dpp::cluster& bot, dpp::snowflake host_id
         msg.add_component(dpp::component().add_component(
             dpp::component().set_label("参加").set_id("hima:join:" + id).set_style(dpp::cos_success)
         ));
-        bot.message_create(msg);
+        bot.message_create(msg, [](const dpp::confirmation_callback_t& message_callback) {
+            if (message_callback.is_error()) {
+                std::cerr << "VC announce message create error: " << message_callback.get_error().message << '\n';
+            } else {
+                std::cerr << "VC announce message created.\n";
+            }
+        });
     });
 }
 
@@ -153,20 +175,23 @@ void HimaVoiceManager::create_post(dpp::cluster& bot, const dpp::slashcommand_t&
         return;
     }
 
-    event.reply(polite(master, "募集VCを作成します。", "作る。"));
+    event.reply(ephemeral_message(polite(master, "募集VCを作成します。", "作る。")));
     create_post_for(bot, host_id, guild_id, announce_channel_id == 0 ? event.command.channel_id : announce_channel_id, game, target, start_time, note);
 }
 
-void HimaVoiceManager::create_post(dpp::cluster& bot, const dpp::form_submit_t& event, const std::string& game, const VcMentionTarget& target, const std::optional<std::string>& start_time, const std::optional<std::string>& note, dpp::snowflake announce_channel_id) {
+void HimaVoiceManager::create_post(dpp::cluster& bot, const dpp::form_submit_t& event, const std::string& game, const VcMentionTarget& target, const std::optional<std::string>& start_time, const std::optional<std::string>& note, dpp::snowflake announce_channel_id, dpp::snowflake guild_id_override) {
     const dpp::snowflake host_id{form_user_id(event)};
-    const dpp::snowflake guild_id{event.command.guild_id};
+    const dpp::snowflake guild_id{guild_id_override == 0 ? event.command.guild_id : guild_id_override};
     const bool master = has_master_role(event.command.member);
+    std::cerr << "VC form submit: guild=" << static_cast<uint64_t>(guild_id)
+              << " announce_channel=" << static_cast<uint64_t>(announce_channel_id)
+              << " fallback_channel=" << static_cast<uint64_t>(event.command.channel_id) << '\n';
     if (guild_id == 0) {
-        event.reply(polite(master, "募集VCはサーバー内でのみ作成できます。", "ここでは無理。"));
+        event.reply(ephemeral_message(polite(master, "募集VCはサーバー内でのみ作成できます。", "ここでは無理。")));
         return;
     }
 
-    event.reply(polite(master, "募集VCを作成します。", "作る。"));
+    event.reply(ephemeral_message(polite(master, "募集VCを作成します。", "作る。")));
     create_post_for(bot, host_id, guild_id, announce_channel_id == 0 ? event.command.channel_id : announce_channel_id, game, target, start_time, note);
 }
 

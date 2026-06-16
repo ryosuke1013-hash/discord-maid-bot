@@ -19,7 +19,7 @@ struct VcMentionTarget {
 class HimaVoiceManager {
 public:
     void create_post(dpp::cluster& bot, const dpp::slashcommand_t& event, const std::string& game, const VcMentionTarget& target, const std::optional<std::string>& start_time, const std::optional<std::string>& note, dpp::snowflake announce_channel_id = {});
-    void create_post(dpp::cluster& bot, const dpp::form_submit_t& event, const std::string& game, const VcMentionTarget& target, const std::optional<std::string>& start_time, const std::optional<std::string>& note, dpp::snowflake announce_channel_id = {});
+    void create_post(dpp::cluster& bot, const dpp::form_submit_t& event, const std::string& game, const VcMentionTarget& target, const std::optional<std::string>& start_time, const std::optional<std::string>& note, dpp::snowflake announce_channel_id = {}, dpp::snowflake guild_id_override = {});
     void create_post(dpp::cluster& bot, const dpp::message& message, const std::string& game, const VcMentionTarget& target, const std::optional<std::string>& start_time, const std::optional<std::string>& note, dpp::snowflake announce_channel_id = {});
     void join_post(dpp::cluster& bot, const dpp::button_click_t& event, const std::string& id);
     void handle_voice_state(const dpp::voice_state_update_t& event);
